@@ -189,7 +189,8 @@ export interface PageResult<T> {
  */
 export interface CreateSessionDTO {
   title: string;
-  model?: string;
+  modelName?: string; // 后端期望的字段名是 modelName，不是 model
+  model?: string; // 保留 model 作为兼容
   [key: string]: any;
 }
 

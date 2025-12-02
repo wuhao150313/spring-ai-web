@@ -12,10 +12,24 @@ import type {
 export function createSession(
   data: CreateSessionDTO
 ): Promise<Result<ChatSessionVO>> {
+  // 后端期望的字段名是 modelName，不是 model
+  const requestData: any = {
+    title: data.title,
+  };
+  
+  // 优先使用 modelName，如果没有则使用 model，最后使用默认值
+  const modelValue = data.modelName || data.model || "default";
+  requestData.modelName = modelValue.trim() || "default";
+  
+  // 确保 modelName 不为空
+  if (!requestData.modelName || requestData.modelName.trim() === "") {
+    requestData.modelName = "default";
+  }
+  
   return request({
     url: "/api/chat/session/create",
     method: "post",
-    data,
+    data: requestData,
   });
 }
 

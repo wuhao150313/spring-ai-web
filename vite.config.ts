@@ -15,6 +15,12 @@ export default defineConfig({
         secure: false,
         rewrite: (path) => `/api-template${path}`,
         ws: true,
+        configure: (proxy, _options) => {
+          proxy.on("error", (err, _req, _res) => {
+            // 静默处理连接错误，避免控制台报错
+            // 后端服务未启动时会出现此错误，属于正常情况
+          });
+        },
       },
       "/ai": {
         target: "http://localhost:8081",
@@ -24,7 +30,8 @@ export default defineConfig({
         ws: true,
         configure: (proxy, _options) => {
           proxy.on("error", (err, _req, _res) => {
-            console.log("proxy error", err);
+            // 静默处理连接错误，避免控制台报错
+            // 后端服务未启动时会出现此错误，属于正常情况
           });
           proxy.on("proxyReq", (proxyReq, req, _res) => {
             console.log("Sending Request to the Target:", req.method, req.url);

@@ -23,6 +23,7 @@ export function getCurrentModel(): Promise<Result<AIModelVO>> {
 
 /**
  * 切换模型
+ * 根据API文档，使用POST方法，modelName作为query参数传递
  */
 export function switchModel(
   modelName: string

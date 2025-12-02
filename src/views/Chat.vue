@@ -225,7 +225,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, nextTick, onMounted, watch, computed } from "vue";
+import { ref, nextTick, onMounted, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import {
   UserFilled,
@@ -248,10 +248,10 @@ import {
   deleteSession,
   getSessionById,
 } from "../api/session";
-import { getModelList, switchModel as switchModelApi } from "../api/model";
+import { getModelList, switchModel as switchModelApi, getCurrentModel } from "../api/model";
 import { useAuthStore } from "../stores/auth";
 import type { Message } from "../types/chat";
-import type { ChatSessionVO, AIModelVO } from "../types";
+import type { ChatSessionVO, AIModelVO, CreateSessionDTO } from "../types";
 
 const authStore = useAuthStore();
 
@@ -304,6 +304,17 @@ const isModelQuestion = (question: string): boolean => {
     "模型信息",
     "你叫什么",
     "你的名字",
+    "你是谁",
+    "你叫什么名字",
+    "介绍",
+    "介绍一下",
+    "介绍一下你自己",
+    "你是什么模型",
+    "你使用什么模型",
+    "基于什么模型",
+    "依托什么模型",
+    "什么ai",
+    "什么助手",
   ];
   const lowerQuestion = question.toLowerCase();
   return modelKeywords.some((keyword) => lowerQuestion.includes(keyword));
@@ -311,7 +322,7 @@ const isModelQuestion = (question: string): boolean => {
 
 // 获取标准回答
 const getStandardAnswer = (): string => {
-  return `我是由default模型支持的智能助手，专为Cursor IDE设计，可以帮您解决各类编程难题，请告诉我你需要什么帮助？`;
+  return `您好，我是运行在default模型上的AI助手，很高兴在Cursor IDE中为您提供帮助，你可以直接告诉我你的具体需求。`;
 };
 
 // 滚动到底部
@@ -343,13 +354,30 @@ const loadSessions = async () => {
 
   try {
     const res = await getSessionList();
-    sessions.value = res.data || [];
-    if (sessions.value.length > 0 && !currentSessionId.value) {
-      currentSessionId.value = sessions.value[0].id || null;
-      loadSessionMessages(currentSessionId.value!);
+    if (res && res.data) {
+      sessions.value = Array.isArray(res.data) ? res.data : [];
+      // 如果当前没有选中会话，且列表不为空，自动选中第一个
+      if (sessions.value.length > 0 && !currentSessionId.value) {
+        const firstSessionId = sessions.value[0]?.id;
+        if (firstSessionId !== undefined && firstSessionId !== null) {
+          currentSessionId.value = firstSessionId;
+          await loadSessionMessages(firstSessionId);
+        }
+      } else if (sessions.value.length === 0) {
+        // 如果没有会话，清空当前会话
+        currentSessionId.value = null;
+        currentMessages.value = [];
+      }
+    } else {
+      sessions.value = [];
     }
-  } catch (error) {
+  } catch (error: any) {
     console.error("加载会话列表失败:", error);
+    // 不显示错误提示，避免干扰用户体验
+    // 如果是401错误，会在request拦截器中处理
+    if (error?.response?.status !== 401) {
+      sessions.value = [];
+    }
   }
 };
 
@@ -359,7 +387,12 @@ const loadSessionMessages = async (sessionId: number) => {
     // 未登录时使用本地存储
     const localMessages = localStorage.getItem(`session_${sessionId}`);
     if (localMessages) {
-      currentMessages.value = JSON.parse(localMessages);
+      try {
+        currentMessages.value = JSON.parse(localMessages);
+      } catch (e) {
+        console.error("解析本地消息失败:", e);
+        currentMessages.value = [];
+      }
     } else {
       currentMessages.value = [];
     }
@@ -368,18 +401,27 @@ const loadSessionMessages = async (sessionId: number) => {
 
   try {
     const res = await getSessionById(sessionId);
-    if (res.data?.messages) {
-      currentMessages.value = res.data.messages.map((msg: any) => ({
-        role: msg.role || "assistant",
-        content: msg.content || "",
-        time: formatTime(new Date(msg.createTime || Date.now())),
-      }));
+    if (res && res.data) {
+      // 处理消息数据，兼容不同的数据结构
+      if (res.data.messages && Array.isArray(res.data.messages)) {
+        currentMessages.value = res.data.messages.map((msg: any) => ({
+          role: msg.role || "assistant",
+          content: msg.content || "",
+          time: formatTime(new Date(msg.createTime || msg.time || Date.now())),
+        }));
+      } else {
+        currentMessages.value = [];
+      }
     } else {
       currentMessages.value = [];
     }
-  } catch (error) {
+  } catch (error: any) {
     console.error("加载会话消息失败:", error);
     currentMessages.value = [];
+    // 如果是404，说明会话不存在，可以提示用户
+    if (error?.response?.status === 404) {
+      ElMessage.warning("会话不存在或已被删除");
+    }
   }
 };
 
@@ -391,23 +433,140 @@ const handleCreateSession = async () => {
   }
 
   try {
-    const res = await createSession({
-      title: `新会话 ${new Date().toLocaleString()}`,
-    });
-    sessions.value.unshift(res.data);
-    currentSessionId.value = res.data.id || null;
-    currentMessages.value = [];
-    ElMessage.success("会话创建成功");
-  } catch (error) {
+    const title = `新会话 ${new Date().toLocaleString("zh-CN", {
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    })}`;
+    
+    // 获取当前模型，确保模型不为空
+    let modelName = selectedModel.value?.trim();
+    
+    // 如果selectedModel为空，尝试从模型列表获取
+    if (!modelName && models.value.length > 0 && models.value[0]?.name) {
+      modelName = models.value[0].name.trim();
+    }
+    
+    // 如果模型列表为空，先加载模型列表
+    if (!modelName && models.value.length === 0) {
+      try {
+        await loadModels();
+        if (models.value.length > 0 && models.value[0]?.name) {
+          modelName = models.value[0].name.trim();
+          selectedModel.value = modelName;
+        }
+      } catch (error) {
+        console.warn("加载模型列表失败:", error);
+      }
+    }
+    
+    // 如果还是没有，尝试获取当前模型
+    if (!modelName) {
+      try {
+        const currentModelRes = await getCurrentModel();
+        if (currentModelRes && currentModelRes.data && currentModelRes.data.name) {
+          modelName = currentModelRes.data.name.trim();
+          selectedModel.value = modelName;
+        }
+      } catch (error) {
+        console.warn("获取当前模型失败:", error);
+      }
+    }
+    
+    // 最后使用默认值，确保modelName不为空
+    if (!modelName || modelName === "") {
+      modelName = "default";
+    }
+    
+    // 确保模型名称不为空字符串
+    modelName = modelName.trim();
+    if (!modelName) {
+      modelName = "default";
+    }
+    
+    // 关键修复：在创建会话前，先确保后端已设置当前模型
+    // 后端可能从当前模型设置中获取，而不是从请求体
+    // 无论模型是什么，都先设置一次，确保后端有当前模型
+    try {
+      const modelToSet = modelName || "default";
+      console.log("创建会话前，先设置当前模型:", modelToSet);
+      await switchModelApi(modelToSet);
+      console.log("模型设置成功");
+      // 设置成功后，更新 modelName 确保一致
+      modelName = modelToSet;
+    } catch (error) {
+      console.warn("设置模型失败，继续创建会话:", error);
+      // 即使设置失败，也继续创建会话
+    }
+    
+    // 确保传递的数据结构正确，后端期望的字段名是 modelName
+    const finalModelName = (modelName && modelName.trim()) || "default";
+    
+    // 构建请求数据，使用 modelName 字段（后端期望的字段名）
+    const sessionData: CreateSessionDTO = {
+      title: title.trim(),
+      modelName: finalModelName.trim(), // 使用 modelName 而不是 model
+    };
+    
+    // 最终验证：确保 modelName 字段是有效的非空字符串
+    if (!sessionData.modelName || typeof sessionData.modelName !== 'string') {
+      sessionData.modelName = "default";
+    }
+    sessionData.modelName = String(sessionData.modelName).trim();
+    if (sessionData.modelName === "" || sessionData.modelName.length === 0) {
+      sessionData.modelName = "default";
+    }
+    
+    // 验证最终数据
+    console.log("=== 创建会话最终参数 ===");
+    console.log("完整数据:", JSON.stringify(sessionData, null, 2));
+    console.log("模型字段(modelName):", sessionData.modelName);
+    console.log("模型类型:", typeof sessionData.modelName);
+    console.log("模型长度:", sessionData.modelName.length);
+    console.log("模型是否为空:", sessionData.modelName === "");
+    console.log("========================");
+    
+    const res = await createSession(sessionData);
+    
+    if (res && res.data) {
+      // 将新会话添加到列表顶部
+      sessions.value.unshift(res.data);
+      // 切换到新创建的会话
+      const newSessionId = res.data.id;
+      if (newSessionId !== undefined && newSessionId !== null) {
+        currentSessionId.value = newSessionId;
+        currentMessages.value = [];
+        // 添加欢迎消息
+        const welcomeMessage: Message = {
+          role: "assistant",
+          content: "你好！我是AI助手，有什么可以帮助你的吗？",
+          time: formatTime(),
+        };
+        currentMessages.value.push(welcomeMessage);
+      }
+      ElMessage.success("会话创建成功");
+    } else {
+      throw new Error("创建会话返回数据为空");
+    }
+  } catch (error: any) {
     console.error("创建会话失败:", error);
-    ElMessage.error("创建会话失败");
+    const errorMsg = error?.response?.data?.message || error?.message || "创建会话失败";
+    ElMessage.error(errorMsg);
   }
 };
 
 // 选择会话
-const handleSelectSession = (sessionId: number) => {
+const handleSelectSession = async (sessionId: number) => {
+  // 如果点击的是当前会话，不重复加载
+  if (currentSessionId.value === sessionId) {
+    return;
+  }
+  
   currentSessionId.value = sessionId;
-  loadSessionMessages(sessionId);
+  await loadSessionMessages(sessionId);
+  scrollToBottom();
 };
 
 // 编辑会话
@@ -422,19 +581,30 @@ const handleEditSession = (session: ChatSessionVO) => {
 
 // 保存会话
 const handleSaveSession = async () => {
+  if (!editForm.value.title.trim()) {
+    ElMessage.warning("会话标题不能为空");
+    return;
+  }
+
   try {
-    await updateSessionTitle(editForm.value.id, {
-      title: editForm.value.title,
+    const res = await updateSessionTitle(editForm.value.id, {
+      title: editForm.value.title.trim(),
     });
+    
+    // 更新本地会话列表中的标题
     const session = sessions.value.find((s) => s.id === editForm.value.id);
-    if (session) {
-      session.title = editForm.value.title;
+    if (session && res && res.data) {
+      session.title = res.data.title || editForm.value.title.trim();
+    } else if (session) {
+      session.title = editForm.value.title.trim();
     }
+    
     editDialogVisible.value = false;
     ElMessage.success("保存成功");
-  } catch (error) {
+  } catch (error: any) {
     console.error("保存会话失败:", error);
-    ElMessage.error("保存失败");
+    const errorMsg = error?.response?.data?.message || error?.message || "保存失败";
+    ElMessage.error(errorMsg);
   }
 };
 
@@ -446,28 +616,48 @@ const handleDeleteSession = async (sessionId: number) => {
   }
 
   try {
-    await ElMessageBox.confirm("确定要删除这个会话吗？", "提示", {
-      confirmButtonText: "确定",
+    await ElMessageBox.confirm("确定要删除这个会话吗？删除后无法恢复。", "删除会话", {
+      confirmButtonText: "确定删除",
       cancelButtonText: "取消",
       type: "warning",
+      confirmButtonClass: "el-button--danger",
     });
 
     await deleteSession(sessionId);
+    
+    // 从列表中移除
     sessions.value = sessions.value.filter((s) => s.id !== sessionId);
+    
+    // 如果删除的是当前会话，切换到其他会话
     if (currentSessionId.value === sessionId) {
       if (sessions.value.length > 0) {
-        currentSessionId.value = sessions.value[0].id || null;
-        loadSessionMessages(currentSessionId.value!);
+        const firstSessionId = sessions.value[0]?.id;
+        if (firstSessionId !== undefined && firstSessionId !== null) {
+          currentSessionId.value = firstSessionId;
+          await loadSessionMessages(firstSessionId);
+        } else {
+          currentSessionId.value = null;
+          currentMessages.value = [];
+        }
       } else {
         currentSessionId.value = null;
         currentMessages.value = [];
+        // 如果没有会话了，添加欢迎消息
+        const welcomeMessage: Message = {
+          role: "assistant",
+          content: "你好！我是AI助手，有什么可以帮助你的吗？",
+          time: formatTime(),
+        };
+        currentMessages.value.push(welcomeMessage);
       }
     }
+    
     ElMessage.success("删除成功");
-  } catch (error) {
+  } catch (error: any) {
     if (error !== "cancel") {
       console.error("删除会话失败:", error);
-      ElMessage.error("删除失败");
+      const errorMsg = error?.response?.data?.message || error?.message || "删除失败";
+      ElMessage.error(errorMsg);
     }
   }
 };
@@ -602,7 +792,10 @@ const loadModels = async () => {
     const res = await getModelList();
     models.value = res.data || [];
     if (models.value.length > 0 && !selectedModel.value) {
-      selectedModel.value = models.value[0].name;
+      const firstName = models.value[0]?.name;
+      if (firstName) {
+        selectedModel.value = firstName;
+      }
     }
   } catch (error) {
     console.error("加载模型列表失败:", error);
@@ -675,77 +868,107 @@ onMounted(() => {
   display: flex;
   height: 100%;
   width: 100%;
-  background-color: #f5f5f5;
+  background: transparent;
   overflow: hidden;
+  gap: 0;
 }
 
 /* 左侧会话管理侧边栏 */
 .session-sidebar {
-  width: 280px;
-  min-width: 280px;
-  background-color: white;
-  border-right: 1px solid #e4e7ed;
+  width: 300px;
+  min-width: 300px;
+  background: rgba(255, 255, 255, 0.95);
+  backdrop-filter: blur(10px);
+  border-right: 1px solid rgba(228, 231, 237, 0.5);
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
   overflow: hidden;
+  box-shadow: 2px 0 8px rgba(0, 0, 0, 0.08);
 }
 
 .sidebar-header {
-  padding: 16px;
-  border-bottom: 1px solid #e4e7ed;
+  padding: 20px;
+  border-bottom: 1px solid rgba(228, 231, 237, 0.5);
+  background: linear-gradient(135deg, rgba(102, 126, 234, 0.05) 0%, rgba(118, 75, 162, 0.05) 100%);
 }
 
 .new-session-btn {
   width: 100%;
+  height: 42px;
+  border-radius: 10px;
+  font-weight: 500;
+  box-shadow: 0 2px 8px rgba(102, 126, 234, 0.3);
+  transition: all 0.3s ease;
+}
+
+.new-session-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
 }
 
 .session-list {
   flex: 1;
   overflow-y: auto;
-  padding: 8px;
+  padding: 12px;
+  background: rgba(255, 255, 255, 0.5);
 }
 
 .session-card {
-  padding: 12px;
-  margin-bottom: 8px;
-  border-radius: 8px;
+  padding: 14px 16px;
+  margin-bottom: 10px;
+  border-radius: 12px;
   cursor: pointer;
-  transition: all 0.3s;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   border: 1px solid transparent;
   display: flex;
   justify-content: space-between;
   align-items: center;
+  background: rgba(255, 255, 255, 0.8);
+  backdrop-filter: blur(5px);
 }
 
 .session-card:hover {
-  background-color: #f5f7fa;
-  border-color: #e4e7ed;
+  background: rgba(102, 126, 234, 0.08);
+  border-color: rgba(102, 126, 234, 0.3);
+  transform: translateX(4px);
+  box-shadow: 0 2px 8px rgba(102, 126, 234, 0.15);
 }
 
 .session-card.active {
-  background-color: #e6f4ff;
-  border-color: #409eff;
+  background: linear-gradient(135deg, rgba(102, 126, 234, 0.15) 0%, rgba(118, 75, 162, 0.15) 100%);
+  border-color: rgba(102, 126, 234, 0.5);
+  box-shadow: 0 2px 12px rgba(102, 126, 234, 0.2);
+  transform: translateX(4px);
 }
 
 .session-title {
   flex: 1;
   font-size: 14px;
-  color: #333;
+  color: #2c3e50;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-weight: 500;
+  letter-spacing: 0.3px;
+}
+
+.session-card.active .session-title {
+  color: #667eea;
+  font-weight: 600;
 }
 
 .session-actions {
   display: flex;
-  gap: 4px;
+  gap: 6px;
   opacity: 0;
-  transition: opacity 0.3s;
+  transition: all 0.3s ease;
+  transform: translateX(10px);
 }
 
 .session-card:hover .session-actions {
   opacity: 1;
+  transform: translateX(0);
 }
 
 /* 主对话区域 */
@@ -756,31 +979,34 @@ onMounted(() => {
   height: 100%;
   min-width: 0;
   overflow: hidden;
+  background: rgba(255, 255, 255, 0.6);
+  backdrop-filter: blur(10px);
 }
 
 .chat-messages {
   flex: 1;
   overflow-y: auto;
-  padding: 20px;
+  padding: 24px;
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 24px;
+  background: linear-gradient(to bottom, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.3));
 }
 
 .message-item {
   display: flex;
-  gap: 12px;
-  animation: fadeIn 0.3s ease-in;
+  gap: 14px;
+  animation: fadeInUp 0.4s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-@keyframes fadeIn {
+@keyframes fadeInUp {
   from {
     opacity: 0;
-    transform: translateY(10px);
+    transform: translateY(15px) scale(0.98);
   }
   to {
     opacity: 1;
-    transform: translateY(0);
+    transform: translateY(0) scale(1);
   }
 }
 
@@ -796,7 +1022,7 @@ onMounted(() => {
   max-width: 70%;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
 }
 
 .user-message .message-content {
@@ -808,24 +1034,27 @@ onMounted(() => {
 }
 
 .message-text {
-  padding: 12px 16px;
-  border-radius: 12px;
+  padding: 14px 18px;
+  border-radius: 16px;
   word-wrap: break-word;
-  line-height: 1.6;
+  line-height: 1.7;
+  position: relative;
 }
 
 .user-message .message-text {
-  background-color: #409eff;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
   color: white;
-  border-bottom-right-radius: 4px;
+  border-bottom-right-radius: 6px;
+  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
 }
 
 .ai-message .message-text {
-  background-color: white;
-  color: #333;
-  border: 1px solid #e4e7ed;
-  border-bottom-left-radius: 4px;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+  background: rgba(255, 255, 255, 0.95);
+  backdrop-filter: blur(10px);
+  color: #2c3e50;
+  border: 1px solid rgba(228, 231, 237, 0.6);
+  border-bottom-left-radius: 6px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
 }
 
 .user-text {
@@ -833,16 +1062,19 @@ onMounted(() => {
 }
 
 .message-time {
-  font-size: 12px;
+  font-size: 11px;
   color: #909399;
-  padding: 0 4px;
+  padding: 0 6px;
+  opacity: 0.7;
+  font-weight: 400;
 }
 
 .typing-indicator {
   display: inline-block;
   animation: blink 1s infinite;
-  color: #409eff;
-  margin-left: 4px;
+  color: #667eea;
+  margin-left: 6px;
+  font-weight: bold;
 }
 
 @keyframes blink {
@@ -858,26 +1090,76 @@ onMounted(() => {
 
 /* 输入区域 */
 .chat-input-area {
-  background-color: white;
-  border-top: 1px solid #e4e7ed;
-  padding: 16px 20px;
-  box-shadow: 0 -2px 8px rgba(0, 0, 0, 0.05);
+  background: rgba(255, 255, 255, 0.95);
+  backdrop-filter: blur(10px);
+  border-top: 1px solid rgba(228, 231, 237, 0.5);
+  padding: 20px 24px;
+  box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.08);
+  position: relative;
+}
+
+.chat-input-area::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(102, 126, 234, 0.3), transparent);
 }
 
 .input-config {
   display: flex;
   align-items: center;
-  gap: 16px;
-  margin-bottom: 12px;
+  gap: 18px;
+  margin-bottom: 14px;
   flex-wrap: wrap;
+  padding: 8px 0;
 }
 
 .image-input {
-  margin-bottom: 12px;
+  margin-bottom: 14px;
+}
+
+.image-input :deep(.el-input__wrapper) {
+  border-radius: 10px;
+  transition: all 0.3s ease;
+}
+
+.image-input :deep(.el-input__wrapper):hover {
+  box-shadow: 0 0 0 1px rgba(102, 126, 234, 0.3);
 }
 
 .input-wrapper {
   max-width: 100%;
+}
+
+/* 配置项样式优化 */
+.input-config :deep(.el-checkbox) {
+  margin-right: 0;
+}
+
+.input-config :deep(.el-checkbox__label) {
+  font-size: 13px;
+  color: #606266;
+  font-weight: 500;
+}
+
+.input-config :deep(.el-checkbox__input.is-checked .el-checkbox__inner) {
+  background-color: #667eea;
+  border-color: #667eea;
+}
+
+.input-config :deep(.el-button--small) {
+  border-radius: 8px;
+  font-size: 13px;
+  padding: 8px 14px;
+  transition: all 0.3s ease;
+}
+
+.input-config :deep(.el-button--small:hover) {
+  transform: translateY(-1px);
+  box-shadow: 0 2px 6px rgba(102, 126, 234, 0.2);
 }
 
 .input-textarea {
@@ -885,10 +1167,19 @@ onMounted(() => {
 }
 
 .input-textarea :deep(.el-textarea__inner) {
-  border-radius: 8px;
+  border-radius: 12px;
   font-size: 14px;
-  line-height: 1.6;
+  line-height: 1.7;
   resize: none;
+  border: 1px solid rgba(228, 231, 237, 0.6);
+  transition: all 0.3s ease;
+  background: rgba(255, 255, 255, 0.9);
+}
+
+.input-textarea :deep(.el-textarea__inner):focus {
+  border-color: rgba(102, 126, 234, 0.5);
+  box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+  background: rgba(255, 255, 255, 1);
 }
 
 .input-actions {
@@ -898,7 +1189,23 @@ onMounted(() => {
 }
 
 .send-button {
-  min-width: 100px;
+  min-width: 110px;
+  height: 40px;
+  border-radius: 10px;
+  font-weight: 500;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  border: none;
+  box-shadow: 0 2px 8px rgba(102, 126, 234, 0.3);
+  transition: all 0.3s ease;
+}
+
+.send-button:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+}
+
+.send-button:active:not(:disabled) {
+  transform: translateY(0);
 }
 
 .model-desc {
@@ -910,24 +1217,25 @@ onMounted(() => {
 /* 滚动条样式 */
 .chat-messages::-webkit-scrollbar,
 .session-list::-webkit-scrollbar {
-  width: 6px;
+  width: 8px;
 }
 
 .chat-messages::-webkit-scrollbar-track,
 .session-list::-webkit-scrollbar-track {
-  background: #f1f1f1;
-  border-radius: 3px;
+  background: rgba(241, 241, 241, 0.5);
+  border-radius: 4px;
 }
 
 .chat-messages::-webkit-scrollbar-thumb,
 .session-list::-webkit-scrollbar-thumb {
-  background: #c1c1c1;
-  border-radius: 3px;
+  background: linear-gradient(135deg, rgba(102, 126, 234, 0.5) 0%, rgba(118, 75, 162, 0.5) 100%);
+  border-radius: 4px;
+  transition: all 0.3s ease;
 }
 
 .chat-messages::-webkit-scrollbar-thumb:hover,
 .session-list::-webkit-scrollbar-thumb:hover {
-  background: #a8a8a8;
+  background: linear-gradient(135deg, rgba(102, 126, 234, 0.7) 0%, rgba(118, 75, 162, 0.7) 100%);
 }
 
 /* Markdown 样式优化 */
@@ -968,3 +1276,4 @@ onMounted(() => {
   padding: 0;
 }
 </style>
+
