@@ -11,7 +11,7 @@ export function askQuestionStream(
   return new Promise((resolve, reject) => {
     try {
       const encodedQuestion = encodeURIComponent(question);
-      const url = `http://localhost:8081/ai/qna/ask/stream?question=${encodedQuestion}`;
+      const url = `/ai/qna/ask/stream?question=${encodedQuestion}`;
       // 使用 fetch API 处理流式响应
       fetch(url, {
         method: "GET",

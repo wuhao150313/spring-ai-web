@@ -3,8 +3,8 @@
  * 返回 Promise，会随着流式数据更新回调
  */
 export function analyzeImageByUrl(
-  prompt: string,
-  imageUrl: string,
+  prompt?: string,
+  imageUrl?: string,
   onChunk?: (chunk: string) => void,
   onComplete?: (fullContent: string) => void,
   onError?: (error: Error) => void
@@ -12,12 +12,12 @@ export function analyzeImageByUrl(
   return new Promise((resolve, reject) => {
     try {
       // 对两个参数分别进行URL编码
-      const encodedPrompt = encodeURIComponent(prompt);
-      const encodedImageUrl = encodeURIComponent(imageUrl);
+      const encodedPrompt = encodeURIComponent(prompt || "请分析图片内容");
+      const encodedImageUrl = encodeURIComponent(imageUrl || "");
       // 拼接包含两个参数的接口URL
-      const url = `http://localhost:8081/ai/qna/image/analyze/url?prompt=${encodedPrompt}&imageUrl=${encodedImageUrl}`;
+      const url = `/ai/qna/image/analyze/url?prompt=${encodedPrompt}&imageUrl=${encodedImageUrl}`;
 
-      // 使用 fetch API 处理流式响应（逻辑与你的代码完全一致）
+      // 使用 fetch API 处理流式响应
       fetch(url, {
         method: "GET",
         headers: {
@@ -35,7 +35,7 @@ export function analyzeImageByUrl(
           if (!reader) {
             throw new Error("无法获取响应流");
           }
-          // 读取流式数据（复用你的流处理逻辑）
+          // 读取流式数据
           const readStream = async () => {
             try {
               while (true) {

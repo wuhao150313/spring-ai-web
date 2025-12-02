@@ -8,4 +8,5 @@ import App from "./App.vue";
 
 const app = createApp(App);
 app.use(ElementPlus);
+app.use(ElementPlusX);
 app.mount("#app");

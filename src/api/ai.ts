@@ -6,14 +6,33 @@ import type {
   RecommendRequest,
   SummaryRequest,
 } from "../types";
+import type { AxiosResponse } from "axios";
 
 /**
- * AI 问答
+ * AI 问答（普通）
  */
-export function askQuestion(question: string): Promise<Result<string>> {
+export function askQuestion(
+  question?: string
+): Promise<AxiosResponse<string>> {
   return request({
-    url: `/ai/qna/ask?question=${question}`,
-    method: "post",
+    url: "/ai/qna/ask",
+    method: "get",
+    params: { question },
+    responseType: "text",
+  });
+}
+
+/**
+ * 切换 AI 模型
+ */
+export function switchModel(
+  model?: string
+): Promise<AxiosResponse<string>> {
+  return request({
+    url: "/ai/qna/switch-model",
+    method: "get",
+    params: { model },
+    responseType: "text",
   });
 }
 

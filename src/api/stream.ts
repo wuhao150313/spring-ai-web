@@ -3,15 +3,15 @@
  * 返回 Promise，会随着流式数据更新回调
  */
 export function askQuestionStream(
-  question: string,
+  question?: string,
   onChunk?: (chunk: string) => void,
   onComplete?: (fullContent: string) => void,
   onError?: (error: Error) => void
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     try {
-      const encodedQuestion = encodeURIComponent(question);
-      const url = `http://localhost:8081/ai/qna/ask/stream?question=${encodedQuestion}`;
+      const encodedQuestion = encodeURIComponent(question || "你是谁");
+      const url = `/ai/qna/ask/stream?question=${encodedQuestion}`;
       // 使用 fetch API 处理流式响应
       fetch(url, {
         method: "GET",
