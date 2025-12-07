@@ -25,18 +25,29 @@ service.interceptors.request.use(
 
 // 响应拦截器
 service.interceptors.response.use(
-  (response: AxiosResponse<Result<any>>) => {
-    const res: Result<any> = response.data;
+  (response: AxiosResponse<Result<any> | string | any>) => {
+    // 如果是 text 响应，直接返回
+    if (typeof response.data === "string") {
+      return response;
+    }
 
-    if (res.code === 200) {
-      // 保持 AxiosResponse 结构，将数据封装回 response.data
-      return {
-        ...response,
-        data: res.data,
-      };
+    // 检查是否是 Result 格式（有 code 字段）
+    const res = response.data as any;
+    if (res && typeof res === 'object' && 'code' in res) {
+      // 这是 Result 格式的响应
+      if (res.code === 200) {
+        // 保持 AxiosResponse 结构，将数据封装回 response.data
+        return {
+          ...response,
+          data: res.data,
+        };
+      } else {
+        ElMessage.error(res.message || "请求失败");
+        return Promise.reject(new Error(res.message || "请求失败"));
+      }
     } else {
-      ElMessage.error(res.message || "请求失败");
-      return Promise.reject(new Error(res.message || "请求失败"));
+      // 不是 Result 格式，直接返回（如 8082 端口的 API）
+      return response;
     }
   },
   (error) => {

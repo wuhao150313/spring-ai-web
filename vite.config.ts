@@ -8,7 +8,7 @@ export default defineConfig({
     port: 5173,
     strictPort: true,
     proxy: {
-      // 代理所有 /api 和 /ai 开头的请求到后端
+      // 代理所有 /api 和 /ai 开头的请求到后端（8081端口，带/api-template前缀）
       "/api": {
         target: "http://localhost:8081",
         changeOrigin: true,
@@ -37,6 +37,19 @@ export default defineConfig({
             );
           });
         },
+      },
+      // 校园智能助手API代理（8082端口，无前缀）
+      "/api/v1": {
+        target: "http://localhost:8082",
+        changeOrigin: true,
+        secure: false,
+        ws: true,
+      },
+      "/api/v2": {
+        target: "http://localhost:8082",
+        changeOrigin: true,
+        secure: false,
+        ws: true,
       },
     },
   },

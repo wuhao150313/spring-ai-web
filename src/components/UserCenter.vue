@@ -102,6 +102,10 @@ const handleLogin = async () => {
     ElMessage.success("登录成功");
     loginDialogVisible.value = false;
     loginForm.value = { username: "", password: "" };
+    
+    // 登录成功后，触发页面刷新以加载会话列表
+    // 通过事件通知 Chat 组件重新加载
+    window.dispatchEvent(new CustomEvent("user-logged-in"));
   } catch (error) {
     console.error("登录失败:", error);
   } finally {

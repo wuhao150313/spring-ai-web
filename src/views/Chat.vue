@@ -1,9 +1,10 @@
 <template>
   <div class="chat-layout">
     <!-- 左侧会话管理侧边栏 -->
-    <div class="session-sidebar">
+    <div class="session-sidebar" :class="{ collapsed: sidebarCollapsed }">
       <div class="sidebar-header">
         <el-button
+          v-if="!sidebarCollapsed"
           type="primary"
           :icon="Plus"
           @click="handleCreateSession"
@@ -12,8 +13,24 @@
         >
           新建会话
         </el-button>
+        <el-button
+          v-else
+          type="primary"
+          :icon="Plus"
+          @click="handleCreateSession"
+          :disabled="!authStore.isLoggedIn.value"
+          class="new-session-btn-icon"
+          circle
+        />
+        <el-button
+          :icon="sidebarCollapsed ? ArrowRight : ArrowLeft"
+          text
+          @click="toggleSidebar"
+          class="collapse-btn"
+          :title="sidebarCollapsed ? '展开侧边栏' : '折叠侧边栏'"
+        />
       </div>
-      <div class="session-list" ref="sessionListContainer">
+      <div class="session-list" ref="sessionListContainer" v-show="!sidebarCollapsed">
         <div
           v-for="session in sessions"
           :key="session.id"
@@ -103,11 +120,21 @@
       <div class="chat-input-area">
         <!-- 配置项 -->
         <div class="input-config">
-          <el-checkbox
-            v-model="config.deepThinking"
-            :disabled="!authStore.isLoggedIn.value"
-            label="深度思考"
-          />
+          <!-- 智能助手选择 -->
+          <el-select
+            v-model="selectedAssistant"
+            placeholder="选择智能助手"
+            clearable
+            style="width: 150px"
+            size="small"
+          >
+            <el-option
+              v-for="assistant in assistants"
+              :key="assistant.value"
+              :label="assistant.label"
+              :value="assistant.value"
+            />
+          </el-select>
           <el-checkbox
             v-model="config.webSearch"
             label="联网搜索"
@@ -225,7 +252,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, nextTick, onMounted, watch, computed } from "vue";
+import { ref, nextTick, onMounted, onUnmounted, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import {
   UserFilled,
@@ -236,11 +263,14 @@ import {
   Delete,
   Upload,
   Setting,
+  ArrowLeft,
+  ArrowRight,
 } from "@element-plus/icons-vue";
 import { XMarkdown } from "vue-element-plus-x";
 import { askQuestionStream } from "../api/stream";
 import { webSearch } from "../api/enhanced";
 import { analyzeImageByUrl } from "../api/analysis";
+import { simpleChat, advancedChat } from "../api/chat";
 import {
   getSessionList,
   createSession,
@@ -248,7 +278,7 @@ import {
   deleteSession,
   getSessionById,
 } from "../api/session";
-import { getModelList, switchModel as switchModelApi } from "../api/model";
+import { getModelList, getCurrentModel, switchModel as switchModelApi } from "../api/model";
 import { useAuthStore } from "../stores/auth";
 import type { Message } from "../types/chat";
 import type { ChatSessionVO, AIModelVO } from "../types";
@@ -265,9 +295,18 @@ const streamingContent = ref("");
 const messagesContainer = ref<HTMLElement | null>(null);
 const sessionListContainer = ref<HTMLElement | null>(null);
 
+// 侧边栏折叠状态
+const sidebarCollapsed = ref(false);
+
+// 智能助手列表
+const assistants = [
+  { label: "简单助手（无记忆）", value: "simple" },
+  { label: "高级助手（带记忆）", value: "advanced" },
+];
+const selectedAssistant = ref<string>("");
+
 // 配置项
 const config = ref({
-  deepThinking: false,
   webSearch: false,
   imageAnalysis: false,
 });
@@ -278,6 +317,7 @@ const fileList = ref<any[]>([]);
 // 模型相关
 const models = ref<AIModelVO[]>([]);
 const selectedModel = ref("");
+const currentModel = ref<string>(""); // 当前使用的模型
 const showModelDialog = ref(false);
 const switchingModel = ref(false);
 
@@ -295,6 +335,8 @@ const formatTime = (date: Date = new Date()) => {
 
 // 检查是否是模型相关问题
 const isModelQuestion = (question: string): boolean => {
+  if (!question || !question.trim()) return false;
+  
   const modelKeywords = [
     "你是谁",
     "你是什么",
@@ -304,14 +346,31 @@ const isModelQuestion = (question: string): boolean => {
     "模型信息",
     "你叫什么",
     "你的名字",
+    "你是什么模型",
+    "你基于什么",
+    "你用什么模型",
+    "你是哪个模型",
+    "你是谁开发的",
+    "你是什么ai",
+    "你是什么助手",
+    "你是什么机器人",
+    "你是什么系统",
+    "你是谁开发的",
+    "你叫什么名字",
+    "你的身份",
+    "你的来源",
   ];
-  const lowerQuestion = question.toLowerCase();
-  return modelKeywords.some((keyword) => lowerQuestion.includes(keyword));
+  const lowerQuestion = question.toLowerCase().trim();
+  
+  // 检查是否包含关键词
+  return modelKeywords.some((keyword) => {
+    return lowerQuestion.includes(keyword.toLowerCase());
+  });
 };
 
-// 获取标准回答
+// 获取标准回答（模型相关问题）
 const getStandardAnswer = (): string => {
-  return `我是由default模型支持的智能助手，专为Cursor IDE设计，可以帮您解决各类编程难题，请告诉我你需要什么帮助？`;
+  return "我是由default模型支持的智能助手，专为Cursor IDE设计，可以帮您解决各类编程难题，请告诉我你需要什么帮助？";
 };
 
 // 滚动到底部
@@ -344,12 +403,68 @@ const loadSessions = async () => {
   try {
     const res = await getSessionList();
     sessions.value = res.data || [];
-    if (sessions.value.length > 0 && !currentSessionId.value) {
-      currentSessionId.value = sessions.value[0].id || null;
-      loadSessionMessages(currentSessionId.value!);
+    
+    // 如果没有会话，自动创建一个
+    if (sessions.value.length === 0) {
+      try {
+        // 确保有当前模型
+        let modelToUse = currentModel.value || selectedModel.value;
+        if (!modelToUse) {
+          try {
+            const currentModelRes = await getCurrentModel();
+            modelToUse = currentModelRes.data.name;
+            currentModel.value = modelToUse;
+            selectedModel.value = modelToUse;
+          } catch (modelError) {
+            console.error("获取当前模型失败:", modelError);
+            if (models.value.length > 0 && models.value[0]) {
+              modelToUse = models.value[0].name;
+              currentModel.value = modelToUse;
+              selectedModel.value = modelToUse;
+            } else {
+              throw new Error("无法获取模型信息");
+            }
+          }
+        }
+        
+        if (!modelToUse) {
+          throw new Error("模型不能为空");
+        }
+        
+        console.log("自动创建会话，使用模型:", modelToUse);
+        const newSessionRes = await createSession({
+          title: "新会话",
+          model: modelToUse,
+        });
+        sessions.value = [newSessionRes.data];
+        currentSessionId.value = newSessionRes.data.id || null;
+        currentMessages.value = [];
+      } catch (createError: any) {
+        console.error("自动创建会话失败:", createError);
+        const errorMsg = createError?.response?.data?.message || createError?.message || "创建会话失败";
+        console.error("错误详情:", errorMsg);
+        // 如果创建失败，至少创建一个本地会话
+        sessions.value = [
+          {
+            id: 0,
+            title: "新会话",
+            messages: [],
+          },
+        ];
+        currentSessionId.value = 0;
+      }
+    } else {
+      // 有会话列表，选择第一个
+      if (!currentSessionId.value && sessions.value.length > 0 && sessions.value[0]) {
+        currentSessionId.value = sessions.value[0].id || null;
+        if (currentSessionId.value !== null) {
+          loadSessionMessages(currentSessionId.value);
+        }
+      }
     }
   } catch (error) {
     console.error("加载会话列表失败:", error);
+    ElMessage.error("加载会话列表失败");
   }
 };
 
@@ -390,17 +505,52 @@ const handleCreateSession = async () => {
     return;
   }
 
+  // 确定要使用的模型
+  let modelToUse = currentModel.value || selectedModel.value;
+  
+  // 如果还是没有模型，尝试获取当前模型
+  if (!modelToUse) {
+    try {
+      const currentModelRes = await getCurrentModel();
+      modelToUse = currentModelRes.data.name;
+      currentModel.value = modelToUse;
+      selectedModel.value = modelToUse;
+    } catch (error) {
+      console.error("获取当前模型失败:", error);
+      // 如果获取失败，使用模型列表中的第一个
+      if (models.value.length > 0 && models.value[0]) {
+        modelToUse = models.value[0].name;
+        currentModel.value = modelToUse;
+        selectedModel.value = modelToUse;
+      } else {
+        ElMessage.error("无法获取模型信息，请先切换模型");
+        return;
+      }
+    }
+  }
+
+  // 确保模型不为空
+  if (!modelToUse) {
+    ElMessage.error("模型不能为空，请先切换模型");
+    return;
+  }
+
+  console.log("创建会话，使用模型:", modelToUse);
+
   try {
     const res = await createSession({
       title: `新会话 ${new Date().toLocaleString()}`,
+      model: modelToUse,
     });
     sessions.value.unshift(res.data);
     currentSessionId.value = res.data.id || null;
     currentMessages.value = [];
     ElMessage.success("会话创建成功");
-  } catch (error) {
+  } catch (error: any) {
     console.error("创建会话失败:", error);
-    ElMessage.error("创建会话失败");
+    console.error("错误详情:", error?.response?.data);
+    const errorMsg = error?.response?.data?.message || error?.message || "创建会话失败";
+    ElMessage.error(errorMsg);
   }
 };
 
@@ -455,9 +605,11 @@ const handleDeleteSession = async (sessionId: number) => {
     await deleteSession(sessionId);
     sessions.value = sessions.value.filter((s) => s.id !== sessionId);
     if (currentSessionId.value === sessionId) {
-      if (sessions.value.length > 0) {
+      if (sessions.value.length > 0 && sessions.value[0]) {
         currentSessionId.value = sessions.value[0].id || null;
-        loadSessionMessages(currentSessionId.value!);
+        if (currentSessionId.value !== null) {
+          loadSessionMessages(currentSessionId.value);
+        }
       } else {
         currentSessionId.value = null;
         currentMessages.value = [];
@@ -483,7 +635,18 @@ const handleSend = async () => {
     return;
   }
 
-  // 添加用户消息
+  // 处理智能助手前缀
+  let finalText = text;
+  let assistantPrefix = "";
+  if (selectedAssistant.value) {
+    const assistant = assistants.find((a) => a.value === selectedAssistant.value);
+    if (assistant) {
+      assistantPrefix = assistant.label;
+      finalText = `${assistantPrefix}：${text}`;
+    }
+  }
+
+  // 添加用户消息（显示原始文本，不显示前缀）
   const userMessage: Message = {
     role: "user",
     content: text,
@@ -511,6 +674,74 @@ const handleSend = async () => {
     currentMessages.value.push(aiMessage);
     scrollToBottom();
     return;
+  }
+
+  // 如果选择了智能助手，优先使用智能助手接口
+  if (selectedAssistant.value) {
+    try {
+      isStreaming.value = true;
+      streamingContent.value = "";
+
+      if (selectedAssistant.value === "simple") {
+        // 简单助手（无记忆）
+        const res = await simpleChat(finalText);
+        const answer = res.data || "";
+        streamingContent.value = answer;
+        scrollToBottom();
+      } else if (selectedAssistant.value === "advanced") {
+        // 高级助手（带记忆）
+        const userId = authStore.isLoggedIn.value
+          ? authStore.userInfo.value?.id?.toString() || "guest"
+          : localStorage.getItem("guestUserId") || `guest_${Date.now()}`;
+        
+        // 保存guestUserId到localStorage
+        if (!authStore.isLoggedIn.value) {
+          localStorage.setItem("guestUserId", userId);
+        }
+        
+        const res = await advancedChat({
+          userId,
+          message: text, // 使用原始文本，不加前缀
+        });
+        
+        // advancedChat 现在直接返回 AssistantResponse
+        const answer = res?.answer || "";
+        if (!answer) {
+          console.warn("高级助手返回的答案为空，响应:", res);
+          ElMessage.warning("助手未返回有效答案");
+        } else {
+          streamingContent.value = answer;
+          scrollToBottom();
+        }
+      }
+
+      // 添加到消息列表
+      const aiMessage: Message = {
+        role: "assistant",
+        content: streamingContent.value,
+        time: formatTime(),
+      };
+      currentMessages.value.push(aiMessage);
+      streamingContent.value = "";
+      isStreaming.value = false;
+
+      // 保存消息
+      if (!authStore.isLoggedIn.value && currentSessionId.value !== null) {
+        localStorage.setItem(
+          `session_${currentSessionId.value}`,
+          JSON.stringify(currentMessages.value)
+        );
+      }
+      return;
+    } catch (error: any) {
+      console.error("智能助手请求失败:", error);
+      isStreaming.value = false;
+      streamingContent.value = "";
+      const errorMsg =
+        error?.response?.data?.message || error?.message || "智能助手请求失败";
+      ElMessage.error(errorMsg);
+      return;
+    }
   }
 
   // 根据配置选择不同的API
@@ -594,31 +825,70 @@ const handleNewLine = () => {
   // Shift+Enter 换行
 };
 
+// 切换侧边栏
+const toggleSidebar = () => {
+  sidebarCollapsed.value = !sidebarCollapsed.value;
+};
+
 // 加载模型列表
 const loadModels = async () => {
   if (!authStore.isLoggedIn.value) return;
 
   try {
-    const res = await getModelList();
-    models.value = res.data || [];
-    if (models.value.length > 0 && !selectedModel.value) {
+    // 同时加载模型列表和当前模型
+    const [modelsRes, currentModelRes] = await Promise.all([
+      getModelList(),
+      getCurrentModel(),
+    ]);
+    
+    models.value = modelsRes.data || [];
+    
+    // 设置当前模型
+    if (currentModelRes.data?.name) {
+      currentModel.value = currentModelRes.data.name;
+      selectedModel.value = currentModelRes.data.name;
+    } else if (models.value.length > 0 && models.value[0]) {
+      // 如果没有当前模型，使用第一个
+      currentModel.value = models.value[0].name;
       selectedModel.value = models.value[0].name;
     }
   } catch (error) {
     console.error("加载模型列表失败:", error);
+    // 如果获取当前模型失败，至少加载模型列表
+    try {
+      const modelsRes = await getModelList();
+      models.value = modelsRes.data || [];
+      if (models.value.length > 0 && models.value[0]) {
+        currentModel.value = models.value[0].name;
+        selectedModel.value = models.value[0].name;
+      }
+    } catch (e) {
+      console.error("加载模型列表也失败:", e);
+    }
   }
 };
 
 // 切换模型
 const handleSwitchModel = async () => {
+  if (!selectedModel.value) {
+    ElMessage.warning("请先选择模型");
+    return;
+  }
+
   try {
     switchingModel.value = true;
-    await switchModelApi(selectedModel.value);
+    console.log("切换模型到:", selectedModel.value);
+    const res = await switchModelApi(selectedModel.value);
+    // 更新当前模型
+    currentModel.value = res.data.name;
+    selectedModel.value = res.data.name;
+    console.log("模型切换成功，当前模型:", currentModel.value);
     showModelDialog.value = false;
     ElMessage.success("模型切换成功");
-  } catch (error) {
+  } catch (error: any) {
     console.error("切换模型失败:", error);
-    ElMessage.error("切换模型失败");
+    const errorMsg = error?.response?.data?.message || error?.message || "切换模型失败";
+    ElMessage.error(errorMsg);
   } finally {
     switchingModel.value = false;
   }
@@ -627,11 +897,13 @@ const handleSwitchModel = async () => {
 // 监听登录状态变化
 watch(
   () => authStore.isLoggedIn.value,
-  (newVal) => {
+  async (newVal) => {
     if (newVal) {
-      loadSessions();
-      loadModels();
+      // 登录后立即加载会话列表和模型列表
+      await loadSessions();
+      await loadModels();
     } else {
+      // 登出后重置为本地会话
       sessions.value = [
         {
           id: 0,
@@ -642,7 +914,8 @@ watch(
       currentSessionId.value = 0;
       currentMessages.value = [];
     }
-  }
+  },
+  { immediate: true }
 );
 
 // 监听消息变化，自动滚动
@@ -653,9 +926,15 @@ watch(
   }
 );
 
+// 监听登录事件
+const handleUserLoggedIn = () => {
+  loadSessions();
+  loadModels();
+};
+
 onMounted(() => {
   loadSessions();
-  if (authStore.isLoggedIn) {
+  if (authStore.isLoggedIn.value) {
     loadModels();
   }
   // 初始化欢迎消息
@@ -667,6 +946,14 @@ onMounted(() => {
     };
     currentMessages.value.push(welcomeMessage);
   }
+  
+  // 监听登录事件
+  window.addEventListener("user-logged-in", handleUserLoggedIn);
+});
+
+// 组件卸载时移除事件监听
+onUnmounted(() => {
+  window.removeEventListener("user-logged-in", handleUserLoggedIn);
 });
 </script>
 
@@ -689,15 +976,65 @@ onMounted(() => {
   flex-direction: column;
   flex-shrink: 0;
   overflow: hidden;
+  transition: width 0.3s ease, min-width 0.3s ease;
+  position: relative;
+}
+
+.session-sidebar.collapsed {
+  width: 60px;
+  min-width: 60px;
 }
 
 .sidebar-header {
   padding: 16px;
   border-bottom: 1px solid #e4e7ed;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: nowrap;
+  justify-content: space-between;
+}
+
+.session-sidebar.collapsed .sidebar-header {
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
 }
 
 .new-session-btn {
+  flex: 1;
+  min-width: 0;
+}
+
+.session-sidebar.collapsed .new-session-btn {
+  display: none;
+}
+
+.new-session-btn-icon {
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+}
+
+.session-sidebar:not(.collapsed) .new-session-btn-icon {
+  display: none;
+}
+
+.collapse-btn {
+  flex-shrink: 0;
+  padding: 4px 8px;
+  cursor: pointer;
+  color: #606266;
+  transition: color 0.3s;
+}
+
+.collapse-btn:hover {
+  color: #409eff;
+}
+
+.session-sidebar.collapsed .collapse-btn {
   width: 100%;
+  justify-content: center;
 }
 
 .session-list {
